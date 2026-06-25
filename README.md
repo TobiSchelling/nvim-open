@@ -55,13 +55,15 @@ nvim-open -h                      # help
 ### Finder "Open With"
 
 After install, right-click a file → **Open With** → **Open in Nvim**. To make it
-the default for a type (e.g. Markdown):
+the **default** for the file types you usually edit (json, txt, md, py):
 
 ```bash
-duti -s com.tobischelling.open-in-nvim net.daringfireball.markdown all
+./app/set-defaults.sh        # requires duti: brew install duti
 ```
 
-or Finder → *Get Info* on a file → *Open With* → choose **Open in Nvim** →
+Edit the `UTIS` list in `app/set-defaults.sh` to add more types. Verify with
+`duti -d <uti>` (note: `duti -x <ext>` can show a stale cache even after the
+change applies). Or set it per-type in Finder → *Get Info* → *Open With* →
 *Change All…*
 
 ### Use from an agent / script
