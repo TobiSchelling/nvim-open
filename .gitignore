@@ -1,0 +1,5 @@
+# Built app bundles (produced by app/build-app.sh into ~/Applications)
+*.app/
+
+# macOS cruft
+.DS_Store

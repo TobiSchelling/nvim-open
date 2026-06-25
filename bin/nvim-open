@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# nvim-open — open files in Neovim inside a Ghostty window.
+#
+# Default (shared) mode: all files land as tabs in ONE Ghostty+Neovim window,
+# driven by a persistent nvim --listen server. Parallel-safe: many concurrent
+# invocations (e.g. from an agent) converge on a single window instead of
+# spawning a storm of GUI windows.
+#
+# Usage:
+#   nvim-open [FILE...]            open FILE(s) as tabs in the shared window
+#   nvim-open -w|--window FILE...  open each FILE in its own Ghostty window
+#   nvim-open                      open a blank shared window
+#   nvim-open -h|--help            this help
+#
+# Env: GHOSTTY_BIN, NVIM_BIN override binary locations.
+set -euo pipefail
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+GHOSTTY_BIN="${GHOSTTY_BIN:-/Applications/Ghostty.app/Contents/MacOS/ghostty}"
+[[ -x "$GHOSTTY_BIN" ]] || GHOSTTY_BIN="$(command -v ghostty || true)"
+NVIM_BIN="${NVIM_BIN:-$(command -v nvim || true)}"
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/nvim-open"
+SOCK="$cache/server.sock"
+LOCKDIR="$cache/lock.d"
+mkdir -p "$cache"
+
+die() { printf 'nvim-open: %s\n' "$*" >&2; exit 1; }
+[[ -n "$NVIM_BIN" ]] || die "nvim not found on PATH"
+[[ -n "$GHOSTTY_BIN" && -x "$GHOSTTY_BIN" ]] || die "ghostty binary not found (set GHOSTTY_BIN)"
+
+mode="shared"
+files=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -w|--window) mode="window" ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --) shift; while [[ $# -gt 0 ]]; do files+=("$1"); shift; done; break ;;
+    -*) die "unknown option: $1 (use -- to pass paths starting with -)" ;;
+    *) files+=("$1") ;;
+  esac
+  shift
+done
+
+abspath() { python3 -c 'import os,sys; print(os.path.abspath(os.path.expanduser(sys.argv[1])))' "$1"; }
+
+abs=()
+for f in "${files[@]:-}"; do
+  [[ -n "$f" ]] && abs+=("$(abspath "$f")")
+done
+
+activate_ghostty() { osascript -e 'tell application "Ghostty" to activate' >/dev/null 2>&1 || true; }
+
+server_alive() {
+  [[ -S "$SOCK" ]] || return 1
+  "$NVIM_BIN" --server "$SOCK" --remote-expr '1' >/dev/null 2>&1
+}
+
+# --- window mode: one Ghostty window per file (no shared server) ---
+if [[ "$mode" == "window" ]]; then
+  if [[ ${#abs[@]} -eq 0 ]]; then
+    "$GHOSTTY_BIN" -e "$NVIM_BIN" >/dev/null 2>&1 &
+  else
+    for f in "${abs[@]}"; do
+      "$GHOSTTY_BIN" -e "$NVIM_BIN" "$f" >/dev/null 2>&1 &
+    done
+  fi
+  exit 0
+fi
+
+# --- shared mode: serialize "check-or-launch server" (macOS has no flock(1)) ---
+acquire_lock() {
+  local waited=0
+  until mkdir "$LOCKDIR" 2>/dev/null; do
+    sleep 0.1; waited=$((waited + 1))
+    [[ $waited -gt 200 ]] && rmdir "$LOCKDIR" 2>/dev/null || true   # 20s stale-lock guard
+  done
+  trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT
+}
+
+acquire_lock
+
+if server_alive; then
+  [[ ${#abs[@]} -gt 0 ]] && "$NVIM_BIN" --server "$SOCK" --remote-tab "${abs[@]}" >/dev/null 2>&1 || true
+  activate_ghostty
+  exit 0
+fi
+
+# No live server — clear any stale socket and launch a fresh server window.
+[[ -e "$SOCK" ]] && rm -f "$SOCK"
+if [[ ${#abs[@]} -gt 0 ]]; then
+  "$GHOSTTY_BIN" -e "$NVIM_BIN" -p --listen "$SOCK" "${abs[@]}" >/dev/null 2>&1 &
+else
+  "$GHOSTTY_BIN" -e "$NVIM_BIN" --listen "$SOCK" >/dev/null 2>&1 &
+fi
+
+# Hold the lock until the socket is live, so concurrent callers --remote in.
+for _ in $(seq 1 150); do        # up to ~15s
+  server_alive && break
+  sleep 0.1
+done
+activate_ghostty
