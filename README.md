@@ -75,9 +75,19 @@ safe and all land in the one window.
 
 - Shared server socket: `${XDG_CACHE_HOME:-~/.cache}/nvim-open/server.sock`
 - Liveness probe: `nvim --server <sock> --remote-expr '1'`
-- Open into existing: `nvim --server <sock> --remote-tab <files>`
-- Launch new server window: `ghostty -e nvim -p --listen <sock> <files>`
+- Open into existing window: `nvim --server <sock> --remote-tab <files>`
+- Launch new server window: `open -na Ghostty.app --args --window-save-state=never -e nvim -p --listen <sock> <files>`
 - Window raise: `osascript -e 'tell application "Ghostty" to activate'`
+
+On macOS the terminal can only be started via `open` (running the `ghostty`
+binary directly with `-e` is unsupported and mis-handles arguments). Because
+`open` needs `-n` to accept `--args` when Ghostty is already running, nvim-open's
+editor window lives in a **dedicated Ghostty instance**, separate from your
+interactive Ghostty. It's bounded at one editor instance — every file you open
+shares it through the server, so you never get a window/instance storm.
+`--window-save-state=never` keeps a previously-saved split layout from being
+restored into the editor window. (Ghostty's `+new-window` IPC, which would let
+this reuse your main instance, isn't supported on macOS as of Ghostty 1.3.x.)
 
 ## License
 
