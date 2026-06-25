@@ -51,25 +51,56 @@ done
 
 activate_ghostty() { osascript -e 'tell application "Ghostty" to activate' >/dev/null 2>&1 || true; }
 
-# Launch a command in a fresh Ghostty window. On macOS, Ghostty's terminal can
-# only be started via `open` — invoking the binary directly with `-e` is
-# unsupported (it mis-handles the args). `--window-save-state=never` stops a
-# previously-saved split/layout from being restored into the new window.
-ghostty_run() {
-  open -na "$GHOSTTY_APP" --args --window-save-state=never -e "$@"
-}
-
 server_alive() {
   [[ -S "$SOCK" ]] || return 1
   "$NVIM_BIN" --server "$SOCK" --remote-expr '1' >/dev/null 2>&1
 }
 
+# macOS only lets us start Ghostty via `open`, and `open --args -e CMD ARGS...`
+# mis-parses a multi-token command — each extra token (nvim's flags, the socket,
+# the file path) spawns its OWN window. So we never pass arguments through `-e`:
+# we hand Ghostty a single zero-arg launcher script that starts the Neovim
+# server, then feed files to it over the socket with --remote/--remote-tab.
+# `--window-save-state=never` keeps a saved split/layout from being restored.
+LAUNCHER="$cache/server-launch.sh"
+
+write_server_launcher() {  # $1 = optional first file, loaded at nvim startup
+  local first="${1:-}"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
+    if [[ -n "$first" ]]; then
+      printf 'exec %q --listen %q %q\n' "$NVIM_BIN" "$SOCK" "$first"
+    else
+      printf 'exec %q --listen %q\n' "$NVIM_BIN" "$SOCK"
+    fi
+  } > "$LAUNCHER"
+  chmod +x "$LAUNCHER"
+}
+
+ghostty_launch() {  # $1 = absolute path to a zero-arg launcher script
+  open -na "$GHOSTTY_APP" --args --window-save-state=never -e "$1"
+}
+
 # --- window mode: one Ghostty window per file (no shared server) ---
 if [[ "$mode" == "window" ]]; then
+  find "$cache" -name 'win.*.sh' -mmin +60 -delete 2>/dev/null || true
+  launch_one() {  # $1 = file (may be empty)
+    local f="$1" tmp
+    tmp="$(mktemp "$cache/win.XXXXXX.sh")"
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
+      if [[ -n "$f" ]]; then printf 'exec %q %q\n' "$NVIM_BIN" "$f"
+      else printf 'exec %q\n' "$NVIM_BIN"; fi
+    } > "$tmp"
+    chmod +x "$tmp"
+    ghostty_launch "$tmp"
+  }
   if [[ ${#abs[@]} -eq 0 ]]; then
-    ghostty_run "$NVIM_BIN"
+    launch_one ""
   else
-    for f in "${abs[@]}"; do ghostty_run "$NVIM_BIN" "$f"; done
+    for f in "${abs[@]}"; do launch_one "$f"; done
   fi
   exit 0
 fi
@@ -86,23 +117,21 @@ acquire_lock() {
 
 acquire_lock
 
-if server_alive; then
-  [[ ${#abs[@]} -gt 0 ]] && "$NVIM_BIN" --server "$SOCK" --remote-tab "${abs[@]}" >/dev/null 2>&1 || true
-  activate_ghostty
-  exit 0
+launched_now=false
+if ! server_alive; then
+  [[ -e "$SOCK" ]] && rm -f "$SOCK"
+  write_server_launcher "${abs[0]:-}"   # bake first file in: loaded at startup, no race
+  ghostty_launch "$LAUNCHER"
+  for _ in $(seq 1 150); do server_alive && break; sleep 0.1; done   # up to ~15s
+  launched_now=true
 fi
 
-# No live server — clear any stale socket and launch a fresh server window.
-[[ -e "$SOCK" ]] && rm -f "$SOCK"
 if [[ ${#abs[@]} -gt 0 ]]; then
-  ghostty_run "$NVIM_BIN" -p --listen "$SOCK" "${abs[@]}"
-else
-  ghostty_run "$NVIM_BIN" --listen "$SOCK"
+  if $launched_now; then
+    # First file already loaded by the launcher; add any remaining files as tabs.
+    [[ ${#abs[@]} -gt 1 ]] && "$NVIM_BIN" --server "$SOCK" --remote-tab "${abs[@]:1}" >/dev/null 2>&1 || true
+  else
+    "$NVIM_BIN" --server "$SOCK" --remote-tab "${abs[@]}" >/dev/null 2>&1 || true
+  fi
 fi
-
-# Hold the lock until the socket is live, so concurrent callers --remote in.
-for _ in $(seq 1 150); do        # up to ~15s
-  server_alive && break
-  sleep 0.1
-done
 activate_ghostty
